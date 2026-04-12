@@ -1,0 +1,566 @@
+# Demo Setup Configuration
+
+# Set to true for development
+dev_mode: false
+
+# Set to true to drop the catalog after setup (dev_mode must be enabled)
+resource_cleanup: false
+
+# Set Course Name — must match the lab 'name' field in manifest.yaml
+course_name: ""
+
+# Compute check for correct serverless version
+serverless_compute_version: "5"
+
+# Catalog and Schema
+catalog:
+  name: null          # null = auto-detect (Vocareum: username, other: prefix_username)
+  prefix: "labuser"   # Used when auto-creating a catalog outside Vocareum
+  schema_name: "agent_apps"
+
+tools:
+  - avg_neigh_price
+
+# Dataset (remove this section to skip data loading)
+data:
+  databricks_share_name: "databricks_airbnb_sample_data"   ## <------ A. Modify if using your own workspace
+  table_name: "sf_airbnb_listings"
+  vocareum_share_name: "airbnb_sample_data"   # must match exactly as in the manifest
+  
+files:
+  file1: 
+    folder_name: "simple-tool-calling-agent"
+    name: "agent.py"
+    file1_contents: |
+      import os
+      from agents import Agent, Runner, set_default_openai_api, set_default_openai_client
+      from databricks_openai import AsyncDatabricksOpenAI
+      import json
+      import mlflow
+
+      mlflow.set_tracking_uri("databricks")
+
+      # Read the endpoint name injected by Databricks Apps
+      SERVING_ENDPOINT_NAME = os.getenv("SERVING_ENDPOINT_NAME")
+
+      # Point the OpenAI Agents SDK at Databricks instead of OpenAI
+      set_default_openai_client(AsyncDatabricksOpenAI())
+      set_default_openai_api("chat_completions")
+
+      experiment_id = os.getenv("MLFLOW_EXPERIMENT_ID")
+      experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME")
+
+      if experiment_id:
+          mlflow.set_experiment(experiment_id=experiment_id)
+      elif experiment_name:
+          mlflow.set_experiment(experiment_name)
+
+      # Define the agent
+      agent = Agent(
+          name="Simple Chatbot",
+          instructions="You are a helpful assistant. Answer the user's questions clearly and concisely.",
+          # Use the serving endpoint name (or fall back to the default FM endpoint)
+          model=SERVING_ENDPOINT_NAME,
+      )
+
+      @mlflow.trace(name="tool_calling_chatbot_run", span_type="AGENT", attributes={"agent_name": "MLflow Chatbot"})
+      async def run_agent(messages: list[dict]) -> str:
+          """
+          Run the agent with a list of messages and return the final reply.
+          - @mlflow.trace creates a trace + root span with inputs/outputs.
+          - mlflow.start_run still logs params/artifacts to the experiment.
+          """
+          with mlflow.start_run(nested=True):
+              # Classic run logging (shows up in Runs/Evaluations)
+              mlflow.log_param("agent_name", agent.name)
+              mlflow.log_param("model_endpoint", agent.model)
+              mlflow.log_param("num_messages", len(messages))
+              mlflow.log_text(json.dumps(messages, indent=2), "inputs/messages.json")
+              # Actual agent call
+              result = await Runner.run(agent, messages)
+              final_output = result.final_output
+              mlflow.log_text(final_output, "outputs/final_output.txt")
+              return final_output
+  file2: 
+    folder_name: "simple-tool-calling-agent"
+    name: "app.yaml"
+    file2_contents: |
+      env:
+        - name: SERVING_ENDPOINT_NAME
+          valueFrom: serving-endpoint          # already correct
+        - name: MLFLOW_EXPERIMENT_ID
+          valueFrom: app-experiment            # experiment app resource key
+          
+      command: ["uv", "run", "start-server"]
+  file3: 
+    folder_name: "simple-tool-calling-agent"
+    name: "databricks.yml"
+    file3_contents: |
+      bundle:
+        name: tool_calling_chatbot
+
+      resources:
+        experiments:
+          chatbot_experiment:
+            name: /Users/${workspace.current_user.userName}/simple-tool-calling-chatbot-experiment
+        apps:
+          tool_calling_chatbot:
+            name: agent-${workspace.current_user.id}-${bundle.target}-3
+            description: "Simple chatbot agent with MLflow tracing"
+            source_code_path: ./
+            resources:
+              - name: serving-endpoint
+                serving_endpoint:
+                  name: databricks-gpt-5-2
+                  permission: CAN_QUERY
+              - name: app-experiment
+                experiment:
+                  experiment_id: ${resources.experiments.chatbot_experiment.id}
+                  permission: CAN_EDIT
+      targets:
+        dev:
+          mode: development
+          default: true
+  file4: 
+    folder_name: "simple-tool-calling-agent"
+    name: "pyproject.toml"
+    file4_contents: |
+      [project]
+      name = "simple-chatbot"
+      version = "0.1.0"
+      requires-python = ">=3.11"
+      dependencies = [
+          "openai-agents>=0.4.1",
+          "databricks-openai>=0.9.0",
+          "databricks-sdk",
+          "fastapi>=0.115.0",
+          "uvicorn>=0.34.0",
+          "python-dotenv",
+          "mlflow>=3.9.0"
+      ]
+
+      [build-system]
+      requires = ["hatchling"]
+      build-backend = "hatchling.build"
+
+      [tool.hatch.build.targets.wheel]
+      include = ["agent.py", "server.py"]
+
+      [project.scripts]
+      start-server = "server:main"
+
+  file5: 
+    folder_name: "simple-tool-calling-agent"
+    name: "requirements.txt"
+    file5_contents: |
+      uv
+  file6: 
+    folder_name: "simple-tool-calling-agent"
+    name: "server.py"
+    file6_contents: |
+      import uvicorn
+      from pathlib import Path
+
+      from fastapi import FastAPI
+      from fastapi.responses import HTMLResponse
+      from pydantic import BaseModel
+
+      from agent import run_agent
+
+      app = FastAPI()
+
+      CHAT_UI = Path(__file__).parent / "chat.html"
+
+
+      class ChatRequest(BaseModel):
+          input: list[dict]
+
+
+      @app.get("/", response_class=HTMLResponse)
+      async def root():
+          return CHAT_UI.read_text()
+
+
+      @app.post("/invocations")
+      async def invocations(request: ChatRequest):
+          reply = await run_agent(request.input)
+          return {"output": reply}
+
+
+      def main():
+          uvicorn.run("server:app", host="0.0.0.0", port=8000)
+
+
+      if __name__ == "__main__":
+          main()
+  file7:
+    folder_name: "simple-tool-calling-agent"
+    name: "chat.html"
+    file7_contents: |
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Databricks Academy Assistant</title>
+        <style>
+          /* ── Databricks color tokens ── */
+          :root {
+            --db-dark:      #0b2026;
+            --db-red:       #FF5F46;
+            --db-red-dark:  #98102A;
+            --db-teal-dark: #1B5162;
+            --db-teal-mid:  #618794;
+            --db-green:     #00A972;
+            --db-amber:     #FFAB00;
+            --db-blue:      #4299E0;
+            --db-off-white: #F9F7F4;
+            --db-light-bg:  #EEEDE9;
+            --db-gray:      #C2C2C2;
+            --db-pink-lt:   #FABFBA;
+          }
+
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+
+          body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--db-light-bg);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+          }
+
+          /* ── Header / nav bar ── */
+          header {
+            width: 100%;
+            background: var(--db-dark);
+            padding: 0 32px;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,.35);
+          }
+
+          /* ── Databricks Academy SVG logo ── */
+          .db-logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+          }
+          .db-logo-text {
+            display: flex;
+            flex-direction: column;
+            line-height: 1;
+          }
+          .db-logo-text .wordmark {
+            font-size: 18px;
+            font-weight: 700;
+            color: #ffffff;
+            letter-spacing: -0.3px;
+          }
+          .db-logo-text .academy {
+            font-size: 11px;
+            font-weight: 400;
+            color: var(--db-gray);
+            letter-spacing: 1.2px;
+            text-transform: uppercase;
+            margin-top: 2px;
+          }
+
+          /* ── Main chat container ── */
+          main {
+            width: 100%;
+            max-width: 760px;
+            padding: 32px 20px 40px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+          }
+
+          .chat-title {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+          }
+          .chat-title h1 {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--db-dark);
+          }
+          .chat-title p {
+            font-size: 13px;
+            color: var(--db-teal-mid);
+          }
+
+          /* ── Message window ── */
+          #messages {
+            background: #ffffff;
+            border: 1px solid var(--db-gray);
+            border-radius: 10px;
+            padding: 20px;
+            height: 420px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            scroll-behavior: smooth;
+          }
+
+          /* Scrollbar styling */
+          #messages::-webkit-scrollbar { width: 6px; }
+          #messages::-webkit-scrollbar-track { background: var(--db-off-white); border-radius: 4px; }
+          #messages::-webkit-scrollbar-thumb { background: var(--db-gray); border-radius: 4px; }
+
+          .msg { display: flex; }
+          .user  { justify-content: flex-end; }
+          .agent { justify-content: flex-start; }
+
+          .user span {
+            background: var(--db-teal-dark);
+            color: #ffffff;
+            padding: 10px 14px;
+            border-radius: 16px 16px 4px 16px;
+            max-width: 75%;
+            font-size: 14px;
+            line-height: 1.5;
+            word-break: break-word;
+          }
+
+          .agent span {
+            background: var(--db-off-white);
+            color: var(--db-dark);
+            border: 1px solid var(--db-light-bg);
+            padding: 10px 14px;
+            border-radius: 16px 16px 16px 4px;
+            max-width: 75%;
+            font-size: 14px;
+            line-height: 1.5;
+            word-break: break-word;
+          }
+
+          /* ── Greeting message icon + text layout ── */
+          .greeting-content {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+          }
+          .greeting-content img {
+            width: 28px;
+            height: 28px;
+            flex-shrink: 0;
+          }
+
+          /* Thinking indicator */
+          .agent.thinking span {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--db-teal-mid);
+            font-style: italic;
+          }
+          .dot-flashing {
+            display: inline-flex;
+            gap: 4px;
+          }
+          .dot-flashing span {
+            width: 6px; height: 6px;
+            background: var(--db-teal-mid);
+            border-radius: 50%;
+            animation: blink 1.2s infinite;
+            padding: 0; border: none;
+          }
+          .dot-flashing span:nth-child(2) { animation-delay: .2s; }
+          .dot-flashing span:nth-child(3) { animation-delay: .4s; }
+          @keyframes blink {
+            0%, 80%, 100% { opacity: .2; }
+            40% { opacity: 1; }
+          }
+
+          /* ── Input row ── */
+          #input-row {
+            display: flex;
+            gap: 10px;
+          }
+
+          #input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 1.5px solid var(--db-gray);
+            border-radius: 8px;
+            font-size: 14px;
+            color: var(--db-dark);
+            background: #ffffff;
+            outline: none;
+            transition: border-color .2s;
+          }
+          #input:focus {
+            border-color: var(--db-teal-dark);
+            box-shadow: 0 0 0 3px rgba(27,81,98,.12);
+          }
+          #input::placeholder { color: var(--db-teal-mid); }
+
+          #send {
+            padding: 12px 24px;
+            background: var(--db-red);
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: .3px;
+            transition: background .2s, transform .1s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+          }
+          #send:hover:not(:disabled) {
+            background: #e04a32;
+            transform: translateY(-1px);
+          }
+          #send:active:not(:disabled) { transform: translateY(0); }
+          #send:disabled {
+            background: var(--db-gray);
+            cursor: default;
+            transform: none;
+          }
+
+          /* ── Footer note ── */
+          .footer-note {
+            text-align: center;
+            font-size: 11px;
+            color: var(--db-teal-mid);
+            padding-top: 4px;
+          }
+          .footer-note a { color: var(--db-red); text-decoration: none; }
+          .footer-note a:hover { text-decoration: underline; }
+        </style>
+      </head>
+      <body>
+
+        <!-- ── Header ── -->
+        <header>
+          <a class="db-logo" href="#">
+            <!-- Official Databricks symbol -->
+            <svg width="32" height="35" viewBox="0 0 241 266" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M228.085 109.654L120.615 171.674L5.53493 105.41L0 108.475V156.582L120.615 225.911L228.085 164.128V189.596L120.615 251.615L5.53493 185.351L0 188.417V196.67L120.615 266L241 196.67V148.564L235.465 145.498L120.615 211.527L12.9148 149.743V124.275L120.615 186.059L241 116.729V69.3298L235.004 65.7925L120.615 131.585L18.4498 73.1028L120.615 14.3848L204.562 62.7269L211.942 58.4823V52.5869L120.615 0L0 69.3298V76.8759L120.615 146.206L228.085 84.1862V109.654Z" fill="#FF5F46"/>
+            </svg>
+            <span class="db-logo-text">
+              <span class="wordmark">databricks</span>
+              <span class="academy">Academy</span>
+            </span>
+          </a>
+        </header>
+
+        <!-- ── Chat UI ── -->
+        <main>
+          <div class="chat-title">
+            <h1>Databricks Lab App</h1>
+            <p>Powered by Databricks Apps</p>
+          </div>
+
+          <div id="messages">
+            <!-- Seed greeting -->
+            <div class="msg agent">
+              <span>
+                <span class="greeting-content">
+                  <svg width="28" height="31" viewBox="0 0 241 266" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0">
+                    <path d="M228.085 109.654L120.615 171.674L5.53493 105.41L0 108.475V156.582L120.615 225.911L228.085 164.128V189.596L120.615 251.615L5.53493 185.351L0 188.417V196.67L120.615 266L241 196.67V148.564L235.465 145.498L120.615 211.527L12.9148 149.743V124.275L120.615 186.059L241 116.729V69.3298L235.004 65.7925L120.615 131.585L18.4498 73.1028L120.615 14.3848L204.562 62.7269L211.942 58.4823V52.5869L120.615 0L0 69.3298V76.8759L120.615 146.206L228.085 84.1862V109.654Z" fill="#FF5F46"/>
+                  </svg>
+                  Welcome to your demo assistant! How can I help you today?
+                </span>
+              </span>
+            </div>
+          </div>
+
+          <div id="input-row">
+            <input id="input" type="text" placeholder="Ask something about Databricks…" autofocus />
+            <button id="send" onclick="send()">
+              <!-- send arrow icon -->
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"/>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+              Send
+            </button>
+          </div>
+
+          <p class="footer-note">
+            Databricks Academy &mdash; <a href="https://www.databricks.com/learn/training/home" target="_blank">databricks.com/training</a>
+          </p>
+        </main>
+
+        <script>
+          const history = [];
+
+          async function send() {
+            const input  = document.getElementById("input");
+            const sendBtn = document.getElementById("send");
+            const text   = input.value.trim();
+            if (!text) return;
+
+            addMessage("user", text);
+            history.push({ role: "user", content: text });
+            input.value = "";
+            sendBtn.disabled = true;
+
+            // Thinking indicator
+            const thinkingId = addThinking();
+
+            try {
+              const res = await fetch("/invocations", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ input: history })
+              });
+              const data = await res.json();
+              const reply = data.output;
+
+              removeThinking(thinkingId);
+              addMessage("agent", reply);
+              history.push({ role: "assistant", content: reply });
+            } catch (err) {
+              removeThinking(thinkingId);
+              addMessage("agent", "⚠️ Something went wrong. Please try again.");
+            }
+
+            sendBtn.disabled = false;
+            input.focus();
+          }
+
+          function addMessage(role, text) {
+            const div = document.createElement("div");
+            div.className = "msg " + role;
+            const span = document.createElement("span");
+            span.textContent = text;
+            div.appendChild(span);
+            const msgs = document.getElementById("messages");
+            msgs.appendChild(div);
+            msgs.scrollTop = msgs.scrollHeight;
+          }
+
+          function addThinking() {
+            const id = "thinking-" + Date.now();
+            const div = document.createElement("div");
+            div.className = "msg agent thinking";
+            div.id = id;
+            div.innerHTML = `<span>Thinking <span class="dot-flashing"><span></span><span></span><span></span></span></span>`;
+            const msgs = document.getElementById("messages");
+            msgs.appendChild(div);
+            msgs.scrollTop = msgs.scrollHeight;
+            return id;
+          }
+
+          function removeThinking(id) {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+          }
+
+          document.getElementById("input").addEventListener("keydown", e => {
+            if (e.key === "Enter") send();
+          });
+        </script>
+
+      </body>
+      </html>
