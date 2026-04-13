@@ -1,18 +1,26 @@
 bundle:
-  name: very_simple_chatbot
+  name: mlflow_chatbot
 
 resources:
+  experiments:
+    chatbot_experiment:
+      name: /Users/${workspace.current_user.userName}/simple-chatbot-experiment
+
   apps:
-    very_simple_chatbot:
-      name: "agent-${workspace.current_user.id}-${bundle.target}-1"
-      description: "Simple chatbot agent"
+    mlflow_chatbot:
+      name: agent-${workspace.current_user.id}-${bundle.target}-2
+      description: "Simple chatbot agent with MLflow tracing"
       source_code_path: ./
-      # 1) Give the app access to a serving endpoint
       resources:
-        - name: serving-endpoint            # resource key visible to the app
+        - name: serving-endpoint
           serving_endpoint:
-            name: "databricks-gpt-5-2"      # <---- Model Serving endpoint to use
-            permission: CAN_QUERY           # or CAN_VIEW / CAN_MANAGE
+            name: databricks-gpt-5-2
+            permission: CAN_QUERY
+        - name: app-experiment
+          experiment:
+            experiment_id: ${resources.experiments.chatbot_experiment.id}
+            permission: CAN_EDIT
+
 targets:
   dev:
     mode: development
