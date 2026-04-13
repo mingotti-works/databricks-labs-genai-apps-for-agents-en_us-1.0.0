@@ -1,6 +1,6 @@
 env:
   - name: CATALOG_NAME
-    value: # <---- Update
+    value: labuser14650778_1776036658
   - name: FUNCTION_1_NAME
     value: avg_neigh_price
   - name: MLFLOW_EXPERIMENT_ID
