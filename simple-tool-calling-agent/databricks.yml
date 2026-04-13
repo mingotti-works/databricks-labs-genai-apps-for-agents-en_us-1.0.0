@@ -5,7 +5,7 @@ bundle:
 variables:
   catalog_name:
     description: "Per-user lab catalog, e.g. labuser_matthew_mccoy"
-    default: ${var.catalog_name}
+    default: labuser14650778_1776036658
   function_1_name:
     description: "Function to grab the average neighborhood price"
     default: avg_neigh_price
