@@ -1,6 +1,4 @@
 archive
-simple-agent
-simple-tool-calling-agent
 test-simple-agent
 test-simple-agent-with-mlflow
 test-tool-calling-agent
