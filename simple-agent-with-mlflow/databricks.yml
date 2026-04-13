@@ -1,0 +1,19 @@
+bundle:
+  name: very_simple_chatbot
+
+resources:
+  apps:
+    very_simple_chatbot:
+      name: "agent-${workspace.current_user.id}-${bundle.target}-1"
+      description: "Simple chatbot agent"
+      source_code_path: ./
+      # 1) Give the app access to a serving endpoint
+      resources:
+        - name: serving-endpoint            # resource key visible to the app
+          serving_endpoint:
+            name: "databricks-gpt-5-2"      # <---- Model Serving endpoint to use
+            permission: CAN_QUERY           # or CAN_VIEW / CAN_MANAGE
+targets:
+  dev:
+    mode: development
+    default: true

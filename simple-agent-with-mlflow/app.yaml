@@ -1,0 +1,5 @@
+env:
+  - name: SERVING_ENDPOINT_NAME
+    valueFrom: serving-endpoint   # resource key you configured
+    
+command: ["uv", "run", "start-server"]
