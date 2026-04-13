@@ -1,7 +1,11 @@
 env:
+  - name: CATALOG_NAME
+    value: # <---- Update
+  - name: FUNCTION_1_NAME
+    value: avg_neigh_price
   - name: MLFLOW_EXPERIMENT_ID
-    valueFrom: app-experiment            # experiment app resource key
+    valueFrom: app-experiment
   - name: SERVING_ENDPOINT_NAME
-    valueFrom: serving-endpoint          # already correct
-    
+    valueFrom: serving-endpoint
+
 command: ["uv", "run", "start-server"]
